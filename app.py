@@ -3,6 +3,7 @@
 Sistema de Gestión de Estacionamiento Vehicular Universitario
 Interfaces interactivas (Dash) para cada Caso de Uso especificado:
 
+CU-00 Registrar Usuario y Vehículo en el Sistema
 CU-01 Registrar Ingreso de Vehículo
 CU-02 Registrar Salida de Vehículo
 CU-03 Generar Reportes en Tiempo Real
@@ -95,9 +96,53 @@ def construir_pagos():
     }
 
 
+# ---------------------------------------------------------------------------
+# Actor secundario de CU-00: Servicio Institucional de la UTP (simulado)
+# Este "directorio" representa la fuente externa que valida identidad y
+# categoría (Estudiante, Docente, Administrativo). El SAE nunca escribe aquí,
+# solo consulta: la categoría jamás debe ser editable manualmente por el usuario.
+# ---------------------------------------------------------------------------
+
+INSTITUCIONAL_DIRECTORIO = {
+    "8-101-1111": {"nombre": "Prof. Elena Ríos", "tipo_usuario": "Docente"},
+    "8-202-2222": {"nombre": "Marcos Gil", "tipo_usuario": "Administrativo"},
+    "8-303-3333": {"nombre": "Ana Pérez", "tipo_usuario": "Estudiante Reserva"},
+    "8-404-4444": {"nombre": "Luis Bravo", "tipo_usuario": "Estudiante"},
+    "8-505-5555": {"nombre": "Carla Núñez", "tipo_usuario": "Administrativo"},
+    "8-606-6666": {"nombre": "Prof. Iván Soto", "tipo_usuario": "Docente"},
+    "8-707-7777": {"nombre": "Sofía Cruz", "tipo_usuario": "Estudiante"},
+    "8-808-8888": {"nombre": "Diego Ruiz", "tipo_usuario": "Docente"},
+}
+
+LIMITE_VEHICULOS_POR_USUARIO = 3  # límite institucional (flujo alterno A1)
+
+
+def construir_perfiles(usuarios):
+    """Construye los perfiles institucionales (CU-00): un perfil por cada
+    usuario del directorio de la UTP, con la lista de vehículos asociados.
+    Se pre-cargan algunos vehículos de demo para que CU-01/CU-06/etc. tengan
+    datos con los que trabajar desde el inicio."""
+    perfiles = {
+        cedula: {"nombre": info["nombre"], "tipo_usuario": info["tipo_usuario"], "vehiculos": []}
+        for cedula, info in INSTITUCIONAL_DIRECTORIO.items()
+    }
+    for placa, u in usuarios.items():
+        cedula = u.get("cedula")
+        if cedula in perfiles:
+            perfiles[cedula]["vehiculos"].append(
+                {"placa": placa, "marca": "N/D", "modelo": "N/D", "color": "N/D",
+                 "fecha_registro": "Registro inicial (demo)"}
+            )
+    return perfiles
+
+
+_usuarios_iniciales = construir_usuarios()
+
 DB = {
     "espacios": construir_espacios(),
-    "usuarios": construir_usuarios(),
+    "usuarios": _usuarios_iniciales,
+    "perfiles": construir_perfiles(_usuarios_iniciales),       # CU-00
+    "pendientes_validacion": [],                                 # CU-00 (E2)
     "pagos": construir_pagos(),
     "registros": [],   # ingresos / salidas
     "incidentes": [],  # accesos no autorizados, etc.
@@ -106,8 +151,11 @@ DB = {
 
 
 def reset_all():
+    usuarios = construir_usuarios()
     DB["espacios"] = construir_espacios()
-    DB["usuarios"] = construir_usuarios()
+    DB["usuarios"] = usuarios
+    DB["perfiles"] = construir_perfiles(usuarios)
+    DB["pendientes_validacion"] = []
     DB["pagos"] = construir_pagos()
     DB["registros"] = []
     DB["incidentes"] = []
@@ -153,6 +201,7 @@ server = app.server
 
 MENU = [
     ("/", "Inicio", "fa-home"),
+    ("/cu00", "CU-00 Registrar Usuario/Vehículo", "fa-id-card"),
     ("/cu01", "CU-01 Registrar Ingreso", "fa-sign-in-alt"),
     ("/cu02", "CU-02 Registrar Salida", "fa-sign-out-alt"),
     ("/cu03", "CU-03 Reportes en Tiempo Real", "fa-chart-bar"),
@@ -270,6 +319,327 @@ def tabla_registros():
                               html.Th("Salida"), html.Th("Estado")]))]
         + [html.Tbody(rows)],
         bordered=True, hover=True, striped=True, size="sm",
+    )
+
+
+def obtener_categoria_institucional(cedula):
+    """Simula la llamada al Servicio Institucional de la UTP (actor secundario
+    de CU-00). Devuelve None si la cédula no existe en el directorio."""
+    return INSTITUCIONAL_DIRECTORIO.get(cedula)
+
+
+def placa_pertenece_a_otro(cedula, placa):
+    """Recorre todos los perfiles (paso 4 del flujo básico de CU-00) y
+    devuelve la cédula del dueño si la placa ya está asociada a OTRO usuario."""
+    for ced, perfil in DB["perfiles"].items():
+        if ced == cedula:
+            continue
+        if any(v["placa"] == placa for v in perfil["vehiculos"]):
+            return ced
+    return None
+
+
+def badge_categoria(categoria):
+    colores = {
+        "Docente": "primary",
+        "Administrativo": "info",
+        "Estudiante Reserva": "warning",
+        "Estudiante": "secondary",
+    }
+    return dbc.Badge(categoria, color=colores.get(categoria, "secondary"), className="ms-1")
+
+
+def tabla_vehiculos_perfil(cedula):
+    perfil = DB["perfiles"].get(cedula)
+    if not perfil or not perfil["vehiculos"]:
+        return dbc.Alert("Este usuario institucional aún no tiene vehículos registrados.", color="light")
+    rows = [
+        html.Tr([html.Td(v["placa"]), html.Td(v["marca"]), html.Td(v["modelo"]),
+                 html.Td(v["color"]), html.Td(v["fecha_registro"])])
+        for v in perfil["vehiculos"]
+    ]
+    return dbc.Table(
+        [html.Thead(html.Tr([html.Th("Placa"), html.Th("Marca"), html.Th("Modelo"),
+                              html.Th("Color"), html.Th("Registrado")]))]
+        + [html.Tbody(rows)],
+        bordered=True, hover=True, striped=True, size="sm",
+    )
+
+
+def opciones_vehiculo_select(perfil):
+    return [{"label": "➕ Registrar nuevo vehículo", "value": "__nuevo__"}] + [
+        {"label": f"{v['placa']} — {v['marca']} {v['modelo']}", "value": v["placa"]}
+        for v in perfil["vehiculos"]
+    ]
+
+
+# ===========================================================================
+# CU-00 — REGISTRAR USUARIO Y VEHÍCULO EN EL SISTEMA
+# ===========================================================================
+
+def layout_cu00():
+    opciones_usuarios = [
+        {"label": f"{cedula} — {info['nombre']} ({info['tipo_usuario']})", "value": cedula}
+        for cedula, info in INSTITUCIONAL_DIRECTORIO.items()
+    ]
+    return html.Div(
+        [
+            page_header(
+                "CU-00", "Registrar Usuario y Vehículo en el Sistema",
+                "Asocia el vehículo (placa) de un usuario institucional a su perfil dentro del SAE, "
+                "consultando su categoría en el Servicio Institucional de la UTP (actor secundario), "
+                "para que sea reconocido automáticamente en accesos futuros (CU-01) sin ser tratado "
+                "como visitante.",
+            ),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Paso 1 — Identificar usuario institucional"),
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    [
+                                        dbc.Label("Cuenta institucional (UTP)"),
+                                        dcc.Dropdown(
+                                            id="cu00-cedula", options=opciones_usuarios,
+                                            placeholder="Seleccione su cuenta institucional",
+                                        ),
+                                    ],
+                                    md=6,
+                                ),
+                                dbc.Col(
+                                    [
+                                        dbc.Label("Simulación"),
+                                        dbc.Checklist(
+                                            options=[{"label": "Simular falla del Servicio Institucional (E2)", "value": "e2"}],
+                                            id="cu00-chk-e2", switch=True,
+                                        ),
+                                    ],
+                                    md=6,
+                                ),
+                            ],
+                            className="mb-3",
+                        ),
+                        dbc.Button(
+                            [html.I(className="fas fa-id-badge me-2"), "Consultar categoría"],
+                            id="cu00-btn-consultar", color="info",
+                        ),
+                        html.Div(id="cu00-perfil-info", className="mt-3"),
+                    ]
+                ),
+                className="mb-4",
+            ),
+            html.Div(id="cu00-form-vehiculo"),
+            html.Hr(),
+            html.H6("Vehículos registrados del usuario seleccionado"),
+            html.Div(id="cu00-tabla-vehiculos"),
+        ]
+    )
+
+
+@app.callback(
+    Output("cu00-perfil-info", "children"),
+    Output("cu00-form-vehiculo", "children"),
+    Output("cu00-tabla-vehiculos", "children"),
+    Input("cu00-btn-consultar", "n_clicks"),
+    State("cu00-cedula", "value"),
+    State("cu00-chk-e2", "value"),
+    prevent_initial_call=True,
+)
+def cu00_consultar(n, cedula, e2):
+    if not cedula:
+        return dbc.Alert("Seleccione una cuenta institucional.", color="danger"), html.Div(), html.Div()
+
+    # E2: falla en la validación con el servicio institucional
+    if e2 and "e2" in e2:
+        DB["pendientes_validacion"].append({"cedula": cedula, "fecha_hora": ahora()})
+        return (
+            dbc.Alert(
+                [
+                    html.B("E2 — Falla en la validación con el Servicio Institucional. "),
+                    "La solicitud se guardó como 'pendiente de validación' y el sistema reintentará "
+                    "automáticamente al restablecerse la conexión.",
+                ],
+                color="danger",
+            ),
+            html.Div(),
+            tabla_vehiculos_perfil(cedula),
+        )
+
+    # Paso 3 del flujo básico: consultar identidad y categoría (actor secundario)
+    info = obtener_categoria_institucional(cedula)
+    if not info:
+        return dbc.Alert("No se encontró esta cuenta en el Servicio Institucional de la UTP.", color="danger"), html.Div(), html.Div()
+
+    if cedula not in DB["perfiles"]:
+        DB["perfiles"][cedula] = {"nombre": info["nombre"], "tipo_usuario": info["tipo_usuario"], "vehiculos": []}
+    perfil = DB["perfiles"][cedula]
+
+    perfil_info = dbc.Alert(
+        [
+            html.B(f"{perfil['nombre']} "),
+            "— categoría validada por el Servicio Institucional: ",
+            badge_categoria(perfil["tipo_usuario"]),
+            html.Span(" (no editable manualmente).", className="text-muted ms-1"),
+        ],
+        color="success",
+    )
+
+    form = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("Paso 2 — Datos del vehículo"),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            [
+                                dbc.Label("Vehículo (elija 'nuevo' o uno existente para A2)"),
+                                dcc.Dropdown(
+                                    id="cu00-vehiculo-select",
+                                    options=opciones_vehiculo_select(perfil),
+                                    value="__nuevo__", clearable=False,
+                                ),
+                            ],
+                            md=6,
+                        ),
+                        dbc.Col(
+                            [
+                                dbc.Label("Simulación"),
+                                dbc.Checklist(
+                                    options=[{"label": "Simular placa ya registrada por otro usuario (E1)", "value": "e1"}],
+                                    id="cu00-chk-e1", switch=True,
+                                ),
+                            ],
+                            md=6,
+                        ),
+                    ],
+                    className="mb-3",
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col([dbc.Label("Placa"), dbc.Input(id="cu00-placa", placeholder="Ej. MN4455")], md=3),
+                        dbc.Col([dbc.Label("Marca"), dbc.Input(id="cu00-marca", placeholder="Ej. Toyota")], md=3),
+                        dbc.Col([dbc.Label("Modelo"), dbc.Input(id="cu00-modelo", placeholder="Ej. Corolla")], md=3),
+                        dbc.Col([dbc.Label("Color"), dbc.Input(id="cu00-color", placeholder="Ej. Gris")], md=3),
+                    ],
+                    className="mb-3",
+                ),
+                dbc.Button(
+                    [html.I(className="fas fa-save me-2"), "Registrar / Actualizar vehículo"],
+                    id="cu00-btn-guardar", color="success",
+                ),
+                html.Div(id="cu00-resultado", className="mt-3"),
+            ]
+        ),
+        className="mb-4",
+    )
+
+    return perfil_info, form, tabla_vehiculos_perfil(cedula)
+
+
+@app.callback(
+    Output("cu00-placa", "value"),
+    Output("cu00-marca", "value"),
+    Output("cu00-modelo", "value"),
+    Output("cu00-color", "value"),
+    Input("cu00-vehiculo-select", "value"),
+    State("cu00-cedula", "value"),
+    prevent_initial_call=True,
+)
+def cu00_precargar_vehiculo(seleccion, cedula):
+    # A2: si el usuario elige un vehículo existente, se precargan sus datos
+    if not cedula or not seleccion or seleccion == "__nuevo__":
+        return "", "", "", ""
+    perfil = DB["perfiles"].get(cedula, {})
+    for v in perfil.get("vehiculos", []):
+        if v["placa"] == seleccion:
+            return v["placa"], v["marca"], v["modelo"], v["color"]
+    return "", "", "", ""
+
+
+@app.callback(
+    Output("cu00-resultado", "children"),
+    Output("cu00-tabla-vehiculos", "children"),
+    Output("cu00-vehiculo-select", "options"),
+    Output("cu00-vehiculo-select", "value"),
+    Input("cu00-btn-guardar", "n_clicks"),
+    State("cu00-cedula", "value"),
+    State("cu00-vehiculo-select", "value"),
+    State("cu00-placa", "value"),
+    State("cu00-marca", "value"),
+    State("cu00-modelo", "value"),
+    State("cu00-color", "value"),
+    State("cu00-chk-e1", "value"),
+    prevent_initial_call=True,
+)
+def cu00_guardar(n, cedula, seleccion, placa, marca, modelo, color, e1):
+    if not cedula or cedula not in DB["perfiles"]:
+        return dbc.Alert("Primero consulte la categoría del usuario en el Paso 1.", color="danger"), no_update, no_update, no_update
+    if not placa or not placa.strip():
+        return dbc.Alert("Debe indicar la placa del vehículo.", color="danger"), tabla_vehiculos_perfil(cedula), no_update, no_update
+
+    placa = placa.strip().upper()
+    perfil = DB["perfiles"][cedula]
+    es_edicion = bool(seleccion) and seleccion != "__nuevo__"
+
+    # E1: placa ya asociada a otro perfil (real, o forzada con el switch de demo)
+    dueno = placa_pertenece_a_otro(cedula, placa)
+    forzar_e1 = bool(e1) and "e1" in e1
+    if (dueno and (not es_edicion or dueno != cedula)) or forzar_e1:
+        nombre_otro = DB["perfiles"].get(dueno, {}).get("nombre") if dueno else "otro usuario (simulado)"
+        return (
+            dbc.Alert(
+                [
+                    html.B("E1 — Placa ya registrada: "),
+                    f"la placa {placa} ya está asociada a {nombre_otro}. Verifique el número de placa "
+                    "o contacte al Administrador del SAE.",
+                ],
+                color="danger",
+            ),
+            tabla_vehiculos_perfil(cedula), no_update, no_update,
+        )
+
+    if es_edicion:
+        # A2: actualización de datos de un vehículo ya registrado
+        vehiculo = next((v for v in perfil["vehiculos"] if v["placa"] == seleccion), None)
+        if vehiculo is None:
+            return dbc.Alert("El vehículo seleccionado ya no existe.", color="danger"), tabla_vehiculos_perfil(cedula), no_update, no_update
+        placa_anterior = vehiculo["placa"]
+        if placa_anterior != placa and placa_anterior in DB["usuarios"]:
+            del DB["usuarios"][placa_anterior]
+        vehiculo.update({"placa": placa, "marca": marca or "N/D", "modelo": modelo or "N/D", "color": color or "N/D"})
+        mensaje = f"Datos del vehículo {placa} actualizados correctamente (A2)."
+    else:
+        # A1 / flujo básico: registrar un vehículo (adicional o el primero)
+        if len(perfil["vehiculos"]) >= LIMITE_VEHICULOS_POR_USUARIO:
+            return (
+                dbc.Alert(
+                    f"Se alcanzó el límite institucional de {LIMITE_VEHICULOS_POR_USUARIO} vehículos por usuario.",
+                    color="warning",
+                ),
+                tabla_vehiculos_perfil(cedula), no_update, no_update,
+            )
+        perfil["vehiculos"].append(
+            {"placa": placa, "marca": marca or "N/D", "modelo": modelo or "N/D", "color": color or "N/D",
+             "fecha_registro": ahora()}
+        )
+        mensaje = f"Vehículo {placa} registrado y asociado exitosamente al perfil de {perfil['nombre']}."
+
+    # Sincroniza con el mapa global de CU-01, para reconocimiento automático futuro
+    reserva = perfil["tipo_usuario"] in ("Docente", "Administrativo", "Estudiante Reserva")
+    DB["usuarios"][placa] = {
+        "nombre": perfil["nombre"],
+        "tipo_usuario": perfil["tipo_usuario"],
+        "reserva": reserva,
+        "zona_reservada": TIPO_A_ZONA.get(perfil["tipo_usuario"]) if reserva else None,
+        "cedula": cedula,
+    }
+
+    return (
+        dbc.Alert([html.B("Registro exitoso. "), mensaje], color="success"),
+        tabla_vehiculos_perfil(cedula),
+        opciones_vehiculo_select(perfil),
+        placa,
     )
 
 
@@ -1270,6 +1640,7 @@ def layout_inicio():
 
 PAGINAS = {
     "/": layout_inicio,
+    "/cu00": layout_cu00,
     "/cu01": layout_cu01,
     "/cu02": layout_cu02,
     "/cu03": layout_cu03,
